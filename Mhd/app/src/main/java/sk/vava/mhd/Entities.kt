@@ -3,6 +3,9 @@ package sk.vava.mhd
 import androidx.annotation.Nullable
 import com.google.gson.annotations.Expose
 import com.google.gson.annotations.SerializedName
+import com.google.android.gms.maps.model.LatLng
+import net.sharewire.googlemapsclustering.ClusterItem
+
 
 data class Departure(
     val delay: String? = "", // 1min
@@ -65,3 +68,52 @@ data class Transport(
     @Expose
     var vehiclenumber: Int = 0
 )
+
+class MyItem(lat: Double, lng: Double, snippet: String) : ClusterItem {
+
+    private var mPosition: LatLng = LatLng(lat, lng)
+    private var mSnippet: String = snippet
+    var banister: Int = -1
+    var passport: Int = -1
+    var name: String = ""
+
+    override fun getTitle(): String {
+        return ""
+    }
+
+    override fun getSnippet(): String {
+        return mSnippet
+    }
+
+    override fun getLongitude(): Double {
+        return mPosition.longitude
+    }
+
+    override fun getLatitude(): Double {
+        return mPosition.latitude
+    }
+}
+
+class MyItem2(lat: Double, lng: Double, title: String, snippet: String) : ClusterItem {
+
+    private var mPosition: LatLng = LatLng(lat, lng)
+    private var mTitle: String = title
+    private var mSnippet: String = snippet
+    var name: String = ""
+
+    override fun getTitle(): String {
+        return mTitle
+    }
+
+    override fun getSnippet(): String {
+        return mSnippet
+    }
+
+    override fun getLongitude(): Double {
+        return mPosition.longitude
+    }
+
+    override fun getLatitude(): Double {
+        return mPosition.latitude
+    }
+}

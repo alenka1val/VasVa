@@ -3,78 +3,177 @@ package sk.vava.mhd
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.graphics.Color
 import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
-import android.os.Build
-import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
-import android.provider.Settings
+import android.text.Editable
+import android.text.TextWatcher
 import android.util.Log
-
+import android.view.LayoutInflater
+import android.view.View
+import android.view.ViewGroup
+import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.addTextChangedListener
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
+import com.afollestad.materialdialogs.MaterialDialog
+import com.afollestad.materialdialogs.bottomsheets.BottomSheet
+import com.afollestad.materialdialogs.list.customListAdapter
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.GoogleMap
 import com.google.android.gms.maps.OnMapReadyCallback
 import com.google.android.gms.maps.SupportMapFragment
 import com.google.android.gms.maps.model.LatLng
-import com.google.android.gms.maps.model.MarkerOptions
+import kotlinx.android.synthetic.main.activity_maps.*
+import kotlinx.android.synthetic.main.item_departure.view.*
+import kotlinx.android.synthetic.main.item_departure.view.icon
+import kotlinx.android.synthetic.main.item_stop.view.*
+import mumayank.com.airlocationlibrary.AirLocation
+import net.sharewire.googlemapsclustering.Cluster
+import net.sharewire.googlemapsclustering.ClusterManager
+import org.koin.androidx.viewmodel.ext.android.viewModel
+import sk.vava.mhd.ui.map.MapViewModel
+import android.app.Activity
+import android.view.inputmethod.InputMethodManager
 
-import android.widget.Toast
-import com.afollestad.materialdialogs.MaterialDialog
-import com.afollestad.materialdialogs.bottomsheets.BottomSheet
-import com.afollestad.materialdialogs.list.listItems
-import com.google.android.gms.location.FusedLocationProviderClient
-import com.google.android.gms.location.LocationServices
-import com.google.android.gms.maps.model.BitmapDescriptorFactory
-import com.google.android.gms.maps.model.Marker
-import com.google.maps.android.ui.IconGenerator
-import retrofit2.Call
-import retrofit2.Callback
-import retrofit2.Response
-import java.util.*
-import kotlin.concurrent.timerTask
 
-private const val PERMISSION_REQUEST = 10
-
-class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMarkerClickListener,
-    GoogleMap.OnCameraMoveListener {
-
-    lateinit var locationManager: LocationManager
-    private var hasGps = false
-    private var hasNetwork = false
-    private var locationGPS: Location? = null
-    private var locationNetwork: Location? = null
-    private lateinit var fusedLocationClient: FusedLocationProviderClient
+class MapsActivity : AppCompatActivity(), OnMapReadyCallback,
+    GoogleMap.OnCameraIdleListener {
     private lateinit var map: GoogleMap
-    private var busList: MutableList<Marker> = mutableListOf()
-    private var stopList: MutableList<Pair<Marker, Stop>> = mutableListOf()
-    private var permissions =
-        arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION, android.Manifest.permission.ACCESS_COARSE_LOCATION)
 
-    var t: Timer = Timer()
-    var ne = LatLng(0.toDouble(), 0.toDouble())
-    var ne1 = 0.toDouble()
-    var ne2 = 0.toDouble()
-    var sw = LatLng(0.toDouble(), 0.toDouble())
-    var sw1 = 0.toDouble()
-    var sw2 = 0.toDouble()
+    private var airLocation: AirLocation? = null
+
+    private lateinit var clusterManager: ClusterManager<MyItem>
+
+    private var stops = mutableListOf<Stop>()
+    private var requestedStop = ""
+
+    val mapViewModel: MapViewModel by viewModel()
 
     override fun onMapReady(googleMap: GoogleMap) {
 
+        //Gets the google map reference
         map = googleMap
 
-        if (checkPermission(permissions)) {
-            getLocation()
-            map.uiSettings.isZoomControlsEnabled = true
-            map.setOnMarkerClickListener(this)
-            map.isMyLocationEnabled = true
-            map.setOnCameraMoveListener(this)
+        //Gets the Cluster manager reference for clustering markers
+        clusterManager = ClusterManager(this, map)
+
+        //Set custom icon generator, so we can have custom icons
+        clusterManager.setIconGenerator(CustomIconGenerator(this))
+
+        //We will need at least 4 items before the clustering will happen
+        clusterManager.setMinClusterSize(4)
+
+        //The callbacks to map, invoked after certain action
+        clusterManager.setCallbacks(object : ClusterManager.Callbacks<MyItem> {
+            override fun onClusterClick(cluster: Cluster<MyItem>): Boolean {
+                Log.d("TAG", "Clicking on cluster")
+                return false
+            }
+
+            override fun onClusterItemClick(it: MyItem): Boolean {
+                Log.d("TAG", "Clicking on marker")
+                if (it.banister != -1) {
+                    mapViewModel.getDepartureBoard(it.passport, it.banister)
+                    requestedStop = it.name
+                }
+                return false
+            }
+
+        })
+
+        //The camera idle listener
+        map.setOnCameraIdleListener(this@MapsActivity)
+
+        //This will observe on Stops live data, will notify whenever they change
+        mapViewModel.getStopsLiveData().observe(this, androidx.lifecycle.Observer {
+            stops.addAll(it)
+        })
+
+        //This will observe on Transports live data, will notify whenever they change
+        mapViewModel.getTransportsLiveData().observe(this, androidx.lifecycle.Observer {
+            clusterManager.setItems(mutableListOf())
+            placeMarkBusOnMap(it)
+        })
+
+        //This will observe on Departure board live data, will notify whenever they change
+        mapViewModel.getDepartureBoardLiveData().observe(this, androidx.lifecycle.Observer {
+            showDepartures(it)
+        })
+
+        //Set the on click listener on floating action button
+        floatingActionButton.setOnClickListener {
+            navigateToLocation()
         }
+
+        search.addTextChangedListener(object : TextWatcher{
+            override fun afterTextChanged(s: Editable?) {
+                println(s.toString())
+
+                //Filter the stops by query
+                val filtered = stops.filter { it.name != null && it.name.toLowerCase().contains(s.toString().toLowerCase()) }
+
+                //If more than 3 letters
+                if(s.toString().length > 3){
+                    //Show if hidden
+                    if(recycler.visibility == View.GONE){
+                        recycler.visibility = View.VISIBLE
+                    }
+                    recycler.adapter =
+                        StopsAdapter(filtered, this@MapsActivity, object : RecyclerViewListener {
+                            override fun onItemClick(stop: Stop) {
+                                if (stop.location != null) {
+                                    //Animate the camera to stop
+                                    map.animateCamera(
+                                        CameraUpdateFactory.newLatLngZoom(
+                                            LatLng(stop.location.latitude!!, stop.location.longitude!!), 16.0f
+                                        ), 2000, null
+                                    )
+                                    //Hide the list
+                                    recycler.visibility = View.GONE
+                                    //Hide the keyboard
+                                    hideKeyboard(this@MapsActivity)
+                                    //Clear the search
+                                    search.setText("")
+                                }
+                            }
+
+                        })
+                    //Set the linear layout manager, so it will be shown vertically
+                    recycler.layoutManager = LinearLayoutManager(this@MapsActivity)
+
+                } else {
+                    //Hide the list
+                    if(recycler.visibility == View.VISIBLE){
+                        recycler.visibility = View.GONE
+                    }
+                }
+            }
+
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+            }
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+            }
+
+        })
+
+        //Let's start by loading the stops
+        loadStops()
+
+        //Start by navigating to my location
+        navigateToLocation()
     }
 
-    override fun onMarkerClick(p0: Marker?) = false
+    fun hideKeyboard(activity: Activity) {
+        val imm = activity.getSystemService(Activity.INPUT_METHOD_SERVICE) as InputMethodManager
+        //Find the currently focused view, so we can grab the correct window token from it.
+        var view = activity.currentFocus
+        //If no view currently has focus, create a new one, just so we can grab a window token from it
+        if (view == null) {
+            view = View(activity)
+        }
+        imm.hideSoftInputFromWindow(view.windowToken, 0)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -83,354 +182,164 @@ class MapsActivity : AppCompatActivity(), OnMapReadyCallback, GoogleMap.OnMarker
         val mapFragment = supportFragmentManager
             .findFragmentById(R.id.map) as SupportMapFragment
         mapFragment.getMapAsync(this)
-
-        fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
     }
 
-    override fun onCameraMove() {
-        val bounds = map.projection.visibleRegion.latLngBounds
-        ne = bounds.northeast
-        sw = bounds.southwest
-        t.purge()
-        t.cancel()
-        t = Timer()
-        t.schedule(timerTask {
-            if (ne1 != ne.latitude && ne2 != ne.longitude && sw1 != sw.latitude && sw2 != sw.longitude) {
-                ne1 = ne.latitude
-                ne2 = ne.longitude
-                sw1 = sw.latitude
-                sw2 = sw.longitude
-                Log.d("Tag", "Refreshing data")
-                repositoryInterface.getBox(sw1, sw2, ne1, ne2).enqueue(object : Callback<List<Transport>> {
-                    override fun onFailure(call: Call<List<Transport>>, t: Throwable) {
-                        Log.d("TAG", "Fail")
-                        t.printStackTrace()
-                    }
+    override fun onCameraIdle() {
+        val projection = map.projection.visibleRegion.latLngBounds
 
-                    override fun onResponse(call: Call<List<Transport>>, response: Response<List<Transport>>) {
-                        Log.d("TAG", "Response")
-                        if (response.isSuccessful) {
-                            deleteBus()
-                            loadBus(response)
-                        }
-                    }
+        //Start clustering when camera is not moving
+        clusterManager.onCameraIdle()
 
-                })
-                t.cancel()
-            } else {
-                ne1 = ne.latitude
-                ne2 = ne.longitude
-                sw1 = sw.latitude
-                sw2 = sw.longitude
-            }
-            t.cancel()
-        }, 1000)
+        //Get the transport in current box
+        mapViewModel.getTransportsInBox(
+            projection.southwest.latitude,
+            projection.southwest.longitude,
+            projection.northeast.latitude,
+            projection.northeast.longitude
+        )
     }
 
-    private val repositoryInterface by lazy {
-        RepositoryInterface.create()
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        airLocation?.onActivityResult(requestCode, resultCode, data) // ADD THIS LINE INSIDE onActivityResult
+        super.onActivityResult(requestCode, resultCode, data)
     }
 
-    @SuppressLint("MissingPermission")
-    private fun getLocation() {
-        var frst: Boolean
-        frst = true
-        locationManager = getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        hasGps = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)
-        hasNetwork = locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
-
-        if (hasGps || hasNetwork) {
-            if (hasGps) {
-                Log.d("CodeAndroidLocation", "hasGps")
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    5000,
-                    0F,
-                    object : LocationListener {
-                        override fun onLocationChanged(location: Location?) {
-                            if (location != null) {
-                                if (frst) {
-                                    frst = false
-                                    loadGps(location)
-
-                                } else {
-                                    showGpsLocation(location)
-
-                                }
-                            }
-                        }
-
-                        override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
-
-                        }
-
-                        override fun onProviderEnabled(provider: String?) {
-
-                        }
-
-                        override fun onProviderDisabled(provider: String?) {
-
-                        }
-
-                    })
-
-                val localGpsLocation = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                if (localGpsLocation != null) {
-                    if (frst) {
-                        frst = false
-                        loadGps(localGpsLocation)
-                    } else {
-                        showGpsLocation(localGpsLocation)
-
-                    }
-                }
-                if (hasNetwork) {
-                    Log.d("CodeAndroidLocation", "hasGps")
-                    locationManager.requestLocationUpdates(
-                        LocationManager.NETWORK_PROVIDER,
-                        5000,
-                        0F,
-                        object : LocationListener {
-                            override fun onLocationChanged(location: Location?) {
-                                if (location != null) {
-                                    if (frst) {
-                                        frst = false
-                                        loadNetwork(location)
-                                    } else {
-                                        showNetworkLocation(location)
-
-                                    }
-                                }
-                            }
-
-                            override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {
-                            }
-
-                            override fun onProviderEnabled(provider: String?) {
-
-                            }
-
-                            override fun onProviderDisabled(provider: String?) {
-
-                            }
-
-                        })
-
-                    val localNetworkLocation = locationManager.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                    if (localNetworkLocation != null) {
-                        if (frst) {
-                            frst = false
-                            loadNetwork(localNetworkLocation)
-                        } else {
-                            showNetworkLocation(localNetworkLocation)
-
-                        }
-                    }
-
-                    if (locationGPS != null && locationNetwork != null) {
-                        if (locationGPS!!.accuracy > locationNetwork!!.accuracy) {
-                            Log.d("CodeAndroidLocation", "Network Latitude: " + locationNetwork!!.latitude)
-                            Log.d("CodeAndroidLocation", "Network Latitude: " + locationNetwork!!.longitude)
-                        } else {
-                            Log.d("CodeAndroidLocation", "GPS Latitude: " + locationGPS!!.latitude)
-                            Log.d("CodeAndroidLocation", "GPS Latitude: " + locationGPS!!.longitude)
-                        }
-                    }
-                }
-            }
-
-        } else {
-            startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
-        }
-    }
-
-
-    private fun checkPermission(permissionArray: Array<String>): Boolean {
-        var allSuccess = true
-        for (i in permissionArray.indices) {
-            if (checkCallingOrSelfPermission(permissionArray[i]) == PackageManager.PERMISSION_DENIED)
-                allSuccess = false
-        }
-        return allSuccess
-    }
-
-    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<String>, grantResults: IntArray) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        airLocation?.onRequestPermissionsResult(
+            requestCode,
+            permissions,
+            grantResults
+        ) // ADD THIS LINE INSIDE onRequestPermissionResult
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERMISSION_REQUEST) {
-            var allSuccess = true
-            for (i in permissions.indices) {
-                if (grantResults[i] == PackageManager.PERMISSION_DENIED) {
-                    allSuccess = false
-                    val requestAgain =
-                        Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && shouldShowRequestPermissionRationale(
-                            permissions[i]
-                        )
-                    if (requestAgain) {
-                        Toast.makeText(this, "Permission denied", Toast.LENGTH_SHORT).show()
-                    } else {
-                        Toast.makeText(this, "Go to settings and enable the permission", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-            if (allSuccess) {
-                getLocation()
-            }
-
-        }
     }
 
     private fun loadStops() {
-        repositoryInterface.getStops().enqueue(object : Callback<List<Stop>> {
-
-            override fun onFailure(call: Call<List<Stop>>, t: Throwable) {
-                Log.d("loadStops", "Fail")
-            }
-
-            override fun onResponse(call: Call<List<Stop>>, response: Response<List<Stop>>) {
-                Log.d("TAG", "Response")
-                if (response.isSuccessful) {
-                    val transports = response.body()!!
-                    transports.forEach {
-                        if (it.location != null) {
-                            placeMarkStopOnMap(it)
-                        }
-                    }
-                } else {
-                    Log.d("loadStops", "unsuccesful")
-                }
-            }
-
-        })
+        mapViewModel.getStops()
     }
 
-    private fun loadGps(location: Location?) {
-        locationGPS = location
-        val current = LatLng(locationGPS!!.latitude, locationGPS!!.longitude)
-        map.moveCamera(CameraUpdateFactory.newLatLngZoom(current, 16.0f))
-        loadStops()
-    }
+    private fun placeMarkBusOnMap(transports: List<Transport>) {
 
-    private fun loadNetwork(location: Location?) {
-        locationNetwork = location
-        val current = LatLng(locationNetwork!!.latitude, locationNetwork!!.longitude)
-        /*showGpsLocation(location)
-        onCameraMove()*/
-        map.moveCamera(CameraUpdateFactory.newLatLngZoom(current, 16.0f))
-        loadStops()
-    }
+        val myItems = mutableListOf<MyItem>()
 
-    private fun showGpsLocation(location: Location?) {
-        locationGPS = location
-        val current = LatLng(locationGPS!!.latitude, locationGPS!!.longitude)
-        Log.d("CodeAndroidLocation", "GPS Latitude: " + locationGPS!!.latitude)
-        Log.d("CodeAndroidLocation", "Network Latitude: " + locationGPS!!.longitude)
-
-        map.projection.visibleRegion.latLngBounds.southwest
-
-        Log.d("CodeAndroidLocation", "GPS Latitude: " + locationGPS!!.latitude)
-        Log.d("CodeAndroidLocation", "GPS LongLatitude: " + locationGPS!!.longitude)
-    }
-
-    private fun showNetworkLocation(location: Location?) {
-        locationNetwork = location
-        Log.d("CodeAndroidLocation", "Network Latitude: " + locationNetwork!!.latitude)
-        Log.d("CodeAndroidLocation", "Network Latitude: " + locationNetwork!!.longitude)
-
-        val current = LatLng(locationNetwork!!.latitude, locationNetwork!!.longitude)
-        //map.addMarker(MarkerOptions().position(current).title("Current Possition"))
-
-        map.projection.visibleRegion.latLngBounds.southwest
-
-        Log.d("CodeAndroidLocation", "GPS Latitude: " + locationNetwork!!.latitude)
-        Log.d("CodeAndroidLocation", "GPS LongLatitude: " + locationNetwork!!.longitude)
-    }
-
-    private fun deleteBus() {
-        Log.d("Marker", "Bus delete")
-        busList.forEach {
-            it.remove()
-        }
-        busList.clear()
-    }
-
-    private fun loadBus(response: Response<List<Transport>>) {
-        val transports = response.body()!!
-
-        transports.forEach {
-            if (it.location != null) {
-                placeMarkBusOnMap(it)
+        //First add all transports
+        transports.forEach { transport ->
+            transport.location?.let {
+                val item = MyItem(it.latitude ?: 0.toDouble(), it.longitude ?: 0.toDouble(), "")
+                item.name = transport.linename.toString()
+                myItems.add(item)
             }
         }
-    }
 
-    private fun placeMarkBusOnMap(transport: Transport) {
-        val mark = MarkerOptions().position(LatLng(transport.location?.latitude!!, transport.location?.longitude!!))
-        val marker2 = IconGenerator(this)
-        marker2.setTextAppearance(R.style.iconGenText)
-
-        Log.d("Marker", "BusAdd")
-        marker2.setColor(Color.parseColor("#f2d5d6"))
-        busList.add(map.addMarker(mark.icon(BitmapDescriptorFactory.fromBitmap(marker2.makeIcon(transport.linename)))))
-
-        //map.addMarker(mark.icon(BitmapDescriptorFactory.fromBitmap(marker2.makeIcon(transport.linename))))
-
-    }
-
-    private fun placeMarkStopOnMap(stop: Stop) {
-        val mark = MarkerOptions().position(LatLng(stop.location?.latitude!!, stop.location?.longitude!!))
-        val marker2 = IconGenerator(this)
-
-        marker2.setTextAppearance(R.style.iconGenText)
-
-        Log.d("Marker", "StopAdd")
-        marker2.setColor(Color.parseColor("#e0e0ff"))
-        val newMarker = map.addMarker(mark.icon(BitmapDescriptorFactory.fromBitmap(marker2.makeIcon(stop.name))))
-        stopList.add(Pair(newMarker, stop))
-
-        map.setOnMarkerClickListener(object : GoogleMap.OnMarkerClickListener {
-            override fun onMarkerClick(p0: Marker?): Boolean {
-                stopList.forEach {
-                    if (p0 == it.first) {
-                        val stop = it.second
-                        Log.d("TAG", stop.toString())
-                        repositoryInterface.getDeparatures(stop.passport ?: 0, stop.banister ?: 0).enqueue(object : Callback<DepartureBoard>{
-                            override fun onFailure(call: Call<DepartureBoard>, t: Throwable) {
-
-                            }
-
-                            override fun onResponse(call: Call<DepartureBoard>, response: Response<DepartureBoard>) {
-                                if(response.isSuccessful){
-                                    response.body()?.let {
-                                        showDepartures(it)
-                                    }
-                                }
-                            }
-
-                        })
-                    }
-                }
-                return true
+        //Then add all stops
+        stops.forEach { stop ->
+            stop.location?.let {
+                val item = MyItem(it.latitude ?: 0.toDouble(), it.longitude ?: 0.toDouble(), stop.name.toString())
+                item.banister = stop.banister ?: 0
+                item.passport = stop.passport ?: 0
+                item.name = stop.name.toString()
+                myItems.add(item)
             }
-        })
+        }
+
+        //Add them to one cluster manager
+        clusterManager.setItems(myItems)
 
     }
 
     private fun showDepartures(departureBoard: DepartureBoard) {
-        val items = mutableListOf<String>()
-        val icons = mutableListOf<Int>()
-        departureBoard.departures?.forEach {
-            items.add("${it?.lineName} - ${it?.departureTime}")
-            icons.add(R.drawable.ic_bus)
-        }
-//        if(items.isEmpty())
-//            return
+        //Show the bottom sheet dialog with actual departures
         MaterialDialog(this, BottomSheet()).show {
-            title(R.string.zastavky)
-            listItems(items = items)
+            title(text = getString(R.string.zastavky) + " - " + requestedStop)
+            customListAdapter(
+                DepartureAdapter(
+                    departureBoard.departures ?: mutableListOf<Departure>(),
+                    this@MapsActivity
+                ), LinearLayoutManager(this@MapsActivity)
+            )
         }
     }
 
+    private fun navigateToLocation() {
+        //Get the latest location
+        airLocation = AirLocation(this, true, true, object : AirLocation.Callbacks {
+            @SuppressLint("MissingPermission")
+            override fun onSuccess(location: Location) {
+                map.isMyLocationEnabled = true
+                map.uiSettings.apply {
+                    isCompassEnabled = false
+                    isMapToolbarEnabled = false
+                    isMyLocationButtonEnabled = false
+                }
 
+                //Animate camera to current location
+                map.animateCamera(
+                    CameraUpdateFactory.newLatLngZoom(
+                        LatLng(location.latitude, location.longitude), 16.0f
+                    ), 2000, null
+                )
+            }
+
+            override fun onFailed(locationFailedEnum: AirLocation.LocationFailedEnum) {
+            }
+
+        })
+    }
+
+    class DepartureAdapter(val items: List<Departure?>, val context: Context) : RecyclerView.Adapter<ViewHolder>() {
+
+        // Gets the number of animals in the list
+        override fun getItemCount(): Int {
+            return items.size
+        }
+
+        // Inflates the item views
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+            return ViewHolder(LayoutInflater.from(context).inflate(R.layout.item_departure, parent, false))
+        }
+
+        // Binds each animal in the ArrayList to a view
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            holder.itemView.lineName.text = items[position]?.lineName
+            holder.itemView.departureTime.text = items[position]?.departureTime
+            holder.itemView.delay.text = items[position]?.delay
+            if (items[position]?.transportTypeName == "A") {
+                holder.itemView.icon.setImageResource(R.drawable.ic_tram)
+            } else {
+                holder.itemView.icon.setImageResource(R.drawable.ic_bus)
+            }
+        }
+    }
+
+    class StopsAdapter(val items: List<Stop>, val context: Context, var listener: RecyclerViewListener) :
+        RecyclerView.Adapter<ViewHolder>() {
+
+        // Gets the number of animals in the list
+        override fun getItemCount(): Int {
+            return items.size
+        }
+
+        // Inflates the item views
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
+            return ViewHolder(LayoutInflater.from(context).inflate(R.layout.item_stop, parent, false))
+        }
+
+        // Binds each animal in the ArrayList to a view
+        override fun onBindViewHolder(holder: ViewHolder, position: Int) {
+            holder.itemView.stopName.text = items[position].name
+            holder.itemView.setOnClickListener {
+                listener.onItemClick(items[position])
+            }
+
+        }
+    }
+
+    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
+        // Holds the TextView that will add each animal to
+    }
+
+    interface RecyclerViewListener {
+        fun onItemClick(stop: Stop)
+    }
 }
 
 

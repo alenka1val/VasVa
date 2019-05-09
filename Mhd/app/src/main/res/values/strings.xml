@@ -1,5 +1,5 @@
 <resources>
     <string name="app_name">Mhd</string>
     <string name="title_activity_maps">Map</string>
-    <string name="zastavky">Zastavky</string>
+    <string name="zastavky">Zastávka</string>
 </resources>

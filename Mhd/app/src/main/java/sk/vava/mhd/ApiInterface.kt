@@ -54,7 +54,7 @@ interface RepositoryInterface {
                         .writeTimeout(2L, TimeUnit.MINUTES)
                         .addNetworkInterceptor(
                             HttpLoggingInterceptor()
-                                .setLevel(HttpLoggingInterceptor.Level.BODY)
+                                .setLevel(HttpLoggingInterceptor.Level.HEADERS)
                         )
                         .build()
                 )
